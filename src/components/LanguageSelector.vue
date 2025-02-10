@@ -806,7 +806,7 @@ button:disabled {
   top: 20px;
   right: 100px;
   padding: 8px 16px;
-  background: #28465e;
+  background: #047974;
   color: white;
   border-radius: 4px;
   cursor: pointer;
@@ -920,7 +920,7 @@ button:disabled {
   top: 20px;
   right: 20px;
   padding: 8px 16px;
-  background: #28465e;
+  background: #047974;
   color: white;
   border-radius: 4px;
   cursor: pointer;
@@ -930,6 +930,10 @@ button:disabled {
   gap: 12px;
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
   font-weight: 500;
+}
+
+.wordlist-button:hover {
+  background: #345a77;
 }
 
 .more-wrapper {
