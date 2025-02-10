@@ -1,29 +1,411 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { ref, onMounted, onUnmounted } from 'vue'
 import ieltsData from '@/assets/IELTS_2.json'
 
-const currentIndex = ref(0)
-const data = ref(ieltsData)
+// IndexedDB 工具类
+const DB_NAME = 'wordsDB'
+const DB_VERSION = 1
 
-const nextWord = () => {
-  if (currentIndex.value < data.value.length - 1) {
-    currentIndex.value++
+class IndexedDBHelper {
+  private db: IDBDatabase | null = null
+
+  async init() {
+    return new Promise<void>((resolve, reject) => {
+      const request = indexedDB.open(DB_NAME, DB_VERSION)
+
+      request.onerror = () => reject(request.error)
+
+      request.onsuccess = () => {
+        this.db = request.result
+        resolve()
+      }
+
+      request.onupgradeneeded = (event) => {
+        const db = (event.target as IDBOpenDBRequest).result
+        // 创建收藏夹存储
+        if (!db.objectStoreNames.contains('favorites')) {
+          db.createObjectStore('favorites', { keyPath: 'id' })
+        }
+        // 创建最后浏览位置存储
+        if (!db.objectStoreNames.contains('lastPosition')) {
+          db.createObjectStore('lastPosition', { keyPath: 'id' })
+        }
+      }
+    })
+  }
+
+  async getFavorites(): Promise<Set<string>> {
+    if (!this.db) throw new Error('Database not initialized')
+    return new Promise((resolve, reject) => {
+      const transaction = this.db!.transaction(['favorites'], 'readonly')
+      const store = transaction.objectStore('favorites')
+      const request = store.get('favorites')
+
+      request.onsuccess = () => {
+        const favorites = request.result?.wordIds || []
+        resolve(new Set(favorites))
+      }
+      request.onerror = () => reject(request.error)
+    })
+  }
+
+  async saveFavorites(favorites: Set<string>) {
+    if (!this.db) throw new Error('Database not initialized')
+    return new Promise<void>((resolve, reject) => {
+      const transaction = this.db!.transaction(['favorites'], 'readwrite')
+      const store = transaction.objectStore('favorites')
+      const request = store.put({
+        id: 'favorites',
+        wordIds: Array.from(favorites)
+      })
+
+      request.onsuccess = () => resolve()
+      request.onerror = () => reject(request.error)
+    })
+  }
+
+  async getLastWordId(): Promise<string | null> {
+    if (!this.db) throw new Error('Database not initialized')
+    return new Promise((resolve, reject) => {
+      const transaction = this.db!.transaction(['lastPosition'], 'readonly')
+      const store = transaction.objectStore('lastPosition')
+      const request = store.get('lastWord')
+
+      request.onsuccess = () => {
+        resolve(request.result?.wordId || null)
+      }
+      request.onerror = () => reject(request.error)
+    })
+  }
+
+  async saveLastWordId(wordId: string) {
+    if (!this.db) throw new Error('Database not initialized')
+    return new Promise<void>((resolve, reject) => {
+      const transaction = this.db!.transaction(['lastPosition'], 'readwrite')
+      const store = transaction.objectStore('lastPosition')
+      const request = store.put({
+        id: 'lastWord',
+        wordId
+      })
+
+      request.onsuccess = () => resolve()
+      request.onerror = () => reject(request.error)
+    })
   }
 }
 
-const prevWord = () => {
+const db = new IndexedDBHelper()
+const currentIndex = ref(0)
+const data = ref(ieltsData)
+const favorites = ref(new Set<string>())
+const showFavorites = ref(false)
+const favoritesList = ref<any[]>([])
+const showWordList = ref(false)
+
+// 添加搜索相关的响应式变量
+const favoriteSearchKey = ref('')
+const wordListSearchKey = ref('')
+const filteredFavorites = ref<any[]>([])
+const filteredWordList = ref<any[]>([])
+
+const showMoreMenu = ref(false)
+
+// 添加点击外部关闭菜单的处理函数
+const closeMoreMenu = (event: MouseEvent) => {
+  const target = event.target as HTMLElement
+  // 如果点击的不是菜单或菜单内的元素，则关闭菜单
+  if (!target.closest('.more-wrapper') && showMoreMenu.value) {
+    showMoreMenu.value = false
+  }
+}
+
+// 初始化数据
+onMounted(async () => {
+  try {
+    await db.init()
+    // 加载收藏数据
+    favorites.value = await db.getFavorites()
+    // 加载上次查看的单词位置
+    const lastWordId = await db.getLastWordId()
+    if (lastWordId) {
+      const index = data.value.findIndex(word => word.content.word.wordId === lastWordId)
+      if (index !== -1) {
+        currentIndex.value = index
+      }
+    }
+    // 初始化单词列表搜索结果
+    filteredWordList.value = data.value
+    document.addEventListener('click', closeMoreMenu)
+  } catch (error) {
+    console.error('Failed to initialize database:', error)
+  }
+})
+
+// 在组件卸载时移除事件监听
+onUnmounted(() => {
+  document.removeEventListener('click', closeMoreMenu)
+})
+
+const toggleFavorite = async (wordId: string) => {
+  if (favorites.value.has(wordId)) {
+    favorites.value.delete(wordId)
+  } else {
+    favorites.value.add(wordId)
+  }
+  // 保存到 IndexedDB
+  try {
+    await db.saveFavorites(favorites.value)
+  } catch (error) {
+    console.error('Failed to save favorites:', error)
+  }
+}
+
+const isFavorite = (wordId: string) => favorites.value.has(wordId)
+
+const saveCurrentWordId = async () => {
+  try {
+    const currentWordId = data.value[currentIndex.value].content.word.wordId
+    await db.saveLastWordId(currentWordId)
+  } catch (error) {
+    console.error('Failed to save last word position:', error)
+  }
+}
+
+// 修改 nextWord 和 prevWord 函数
+const nextWord = async () => {
+  if (currentIndex.value < data.value.length - 1) {
+    currentIndex.value++
+    await saveCurrentWordId()
+  }
+}
+
+const prevWord = async () => {
   if (currentIndex.value > 0) {
     currentIndex.value--
+    await saveCurrentWordId()
+  }
+}
+
+// 监听收藏夹搜索
+const searchFavorites = () => {
+  if (!favoriteSearchKey.value) {
+    filteredFavorites.value = favoritesList.value
+    return
+  }
+  const key = favoriteSearchKey.value.toLowerCase()
+  filteredFavorites.value = favoritesList.value.filter(word =>
+    word.content.word.wordHead.toLowerCase().includes(key) ||
+    word.content.word.content.trans[0].tranCn.includes(key)
+  )
+}
+
+// 监听单词表搜索
+const searchWordList = () => {
+  if (!wordListSearchKey.value) {
+    filteredWordList.value = data.value
+    return
+  }
+  const key = wordListSearchKey.value.toLowerCase()
+  filteredWordList.value = data.value.filter(word =>
+    word.content.word.wordHead.toLowerCase().includes(key) ||
+    word.content.word.content.trans[0].tranCn.includes(key)
+  )
+}
+
+// 修改 toggleFavoritesList
+const toggleFavoritesList = () => {
+  if (showWordList.value) {
+    showWordList.value = false
+  }
+  showFavorites.value = !showFavorites.value
+  if (showFavorites.value) {
+    favoritesList.value = data.value.filter(word =>
+      favorites.value.has(word.content.word.wordId)
+    )
+    filteredFavorites.value = favoritesList.value
+    favoriteSearchKey.value = ''
+  }
+}
+
+// 修改 goToWord 函数
+const goToWord = async (wordId: string) => {
+  const index = data.value.findIndex(word => word.content.word.wordId === wordId)
+  if (index !== -1) {
+    currentIndex.value = index
+    showFavorites.value = false
+    await saveCurrentWordId()
+  }
+}
+
+const toggleWordList = () => {
+  if (showFavorites.value) {
+    showFavorites.value = false
+  }
+  showWordList.value = !showWordList.value
+}
+
+const exportWords = async () => {
+  try {
+    // 获取 IndexedDB 中的所有数据
+    const favoritesData = await db.getFavorites()
+    const lastWordId = await db.getLastWordId()
+
+    // 准备导出的数据
+    const exportData = {
+      words: data.value,
+      favorites: Array.from(favoritesData),
+      lastWordId: lastWordId,
+      exportDate: new Date().toISOString(),
+      version: '1.0'
+    }
+
+    // 创建并下载文件
+    const blob = new Blob([JSON.stringify(exportData, null, 2)], { type: 'application/json' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    const timestamp = new Date().toISOString().split('T')[0]
+    a.download = `words-backup-${timestamp}.json`
+    document.body.appendChild(a)
+    a.click()
+    document.body.removeChild(a)
+    URL.revokeObjectURL(url)
+    showMoreMenu.value = false
+  } catch (error) {
+    console.error('Failed to export data:', error)
+  }
+}
+
+const importWords = async (event: Event) => {
+  const file = (event.target as HTMLInputElement).files?.[0]
+  if (file) {
+    try {
+      const text = await file.text()
+      const importedData = JSON.parse(text)
+
+      // 更新收藏夹
+      favorites.value = new Set(importedData.favorites)
+      await db.saveFavorites(favorites.value)
+
+      // 更新最后浏览的单词位置
+      if (importedData.lastWordId) {
+        await db.saveLastWordId(importedData.lastWordId)
+        const index = data.value.findIndex(word => word.content.word.wordId === importedData.lastWordId)
+        if (index !== -1) {
+          currentIndex.value = index
+        }
+      }
+
+      showMoreMenu.value = false
+    } catch (error) {
+      console.error('Failed to import data:', error)
+    }
   }
 }
 </script>
 
 <template>
   <div class="language-container">
+    <!-- 收藏按钮 -->
+    <div class="favorites-button" @click="toggleFavoritesList">
+      收藏
+      <span class="favorites-count" v-if="favorites.size">{{ favorites.size }}</span>
+    </div>
+
+    <!-- 单词表按钮 -->
+    <div class="wordlist-button">
+      <span @click="toggleWordList">单词表</span>
+      <div class="more-wrapper" @click.stop>
+        <span class="more-icon" @click="showMoreMenu = !showMoreMenu">⋮</span>
+        <div class="more-menu" v-if="showMoreMenu">
+          <div class="menu-item" @click="exportWords">
+            导出数据
+          </div>
+          <label class="menu-item">
+            导入数据
+            <input
+              type="file"
+              accept=".json"
+              style="display: none"
+              @change="importWords"
+            >
+          </label>
+        </div>
+      </div>
+    </div>
+
+    <!-- 添加单词列表面板 -->
+    <div class="wordlist-panel" :class="{ active: showWordList }">
+      <div class="wordlist-header">
+        <h3>单词列表</h3>
+        <span class="close-button" @click="showWordList = false">×</span>
+      </div>
+      <div class="search-box">
+        <input
+          type="text"
+          v-model="wordListSearchKey"
+          @input="searchWordList"
+          placeholder="搜索单词或释义..."
+        >
+      </div>
+      <div class="wordlist-list">
+        <div
+          v-for="(word, index) in filteredWordList"
+          :key="word.content.word.wordId"
+          class="wordlist-item"
+          @click="goToWord(word.content.word.wordId)"
+          :class="{ active: index === currentIndex }"
+        >
+          <span class="word">{{ word.content.word.wordHead }}</span>
+          <span class="translation">{{ word.content.word.content.trans[0].tranCn }}</span>
+        </div>
+        <div v-if="filteredWordList.length === 0" class="empty-message">
+          没有找到匹配的单词
+        </div>
+      </div>
+    </div>
+
+    <!-- 收藏夹弹出框 -->
+    <div class="favorites-panel" :class="{ active: showFavorites }">
+      <div class="favorites-header">
+        <h3>收藏的单词</h3>
+        <span class="close-button" @click="showFavorites = false">×</span>
+      </div>
+      <div class="search-box">
+        <input
+          type="text"
+          v-model="favoriteSearchKey"
+          @input="searchFavorites"
+          placeholder="搜索单词或释义..."
+        >
+      </div>
+      <div class="favorites-list">
+        <div
+          v-for="word in filteredFavorites"
+          :key="word.content.word.wordId"
+          class="favorite-item"
+          @click="goToWord(word.content.word.wordId)"
+        >
+          <span class="word">{{ word.content.word.wordHead }}</span>
+          <span class="translation">{{ word.content.word.content.trans[0].tranCn }}</span>
+        </div>
+        <div v-if="filteredFavorites.length === 0" class="empty-message">
+          {{ favoriteSearchKey ? '没有找到匹配的单词' : '还没有收藏单词' }}
+        </div>
+      </div>
+    </div>
+
     <div class="main-section">
       <div class="word-header">
         <div class="word-header-content">
-          <h2>{{ data[currentIndex].content.word.wordHead }}</h2>
+          <div class="word-title">
+            <h2>{{ data[currentIndex].content.word.wordHead }}</h2>
+            <span
+              class="star"
+              :class="{ active: isFavorite(data[currentIndex].content.word.wordId) }"
+              @click="toggleFavorite(data[currentIndex].content.word.wordId)"
+            >★</span>
+          </div>
           <div class="phonetic">
             <span>美音: {{ data[currentIndex].content.word.content.usphone }}</span>
             <span class="divider"> | </span>
@@ -145,7 +527,7 @@ const prevWord = () => {
 
 .word-header {
   padding: 30px 20px;
-  background: #4CAF50;
+  background: #28465e;
   color: white;
   flex-shrink: 0;
   display: flex;
@@ -216,7 +598,7 @@ const prevWord = () => {
   padding: 20px;
   height: 100%;
   scrollbar-width: thin;
-  scrollbar-color: #4CAF50 #f5f5f5;
+  scrollbar-color: #28465e #f5f5f5;
 }
 
 .left-panel {
@@ -229,7 +611,7 @@ const prevWord = () => {
   padding: 16px;
   border-radius: 6px;
   margin-bottom: 20px;
-  border-left: 3px solid #4CAF50;
+  border-left: 3px solid #28465e;
 }
 
 .word-block h3 {
@@ -313,7 +695,7 @@ const prevWord = () => {
 button {
   padding: 10px 24px;
   border: none;
-  background: #4CAF50;
+  background: #28465e;
   color: white;
   border-radius: 4px;
   cursor: pointer;
@@ -343,7 +725,7 @@ button:disabled {
 
 .left-panel::-webkit-scrollbar-thumb,
 .right-panel::-webkit-scrollbar-thumb {
-  background-color: #4CAF50;
+  background-color: #28465e;
   border-radius: 3px;
 }
 
@@ -394,5 +776,361 @@ button:disabled {
     padding-right: 0;
     margin-bottom: 20px;
   }
+}
+
+.word-title {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+}
+
+.star {
+  font-size: 32px;
+  cursor: pointer;
+  color: rgba(255, 255, 255, 0.3);
+  transition: color 0.3s ease;
+  user-select: none;
+}
+
+.star:hover {
+  color: rgba(255, 255, 255, 0.8);
+}
+
+.star.active {
+  color: #ffd700;
+}
+
+.favorites-button {
+  position: fixed;
+  top: 20px;
+  right: 100px;
+  padding: 8px 16px;
+  background: #28465e;
+  color: white;
+  border-radius: 4px;
+  cursor: pointer;
+  z-index: 1001;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+  font-weight: 500;
+}
+
+.favorites-button:hover {
+  background: #345a77;
+}
+
+.favorites-count {
+  background: rgba(255, 255, 255, 0.2);
+  padding: 2px 6px;
+  border-radius: 10px;
+  font-size: 12px;
+}
+
+.favorites-panel {
+  position: fixed;
+  top: 70px;
+  right: -320px;
+  width: 300px;
+  height: 500px;
+  background: white;
+  border-radius: 8px;
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.15);
+  transition: right 0.3s ease;
+  display: flex;
+  flex-direction: column;
+  z-index: 1000;
+}
+
+.favorites-panel.active {
+  right: 20px;
+}
+
+.favorites-header {
+  padding: 16px;
+  background: #28465e;
+  color: white;
+  border-radius: 8px 8px 0 0;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.close-button {
+  cursor: pointer;
+  font-size: 24px;
+  line-height: 1;
+}
+
+.favorites-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 16px;
+}
+
+.favorite-item {
+  padding: 12px;
+  border-bottom: 1px solid #eee;
+  cursor: pointer;
+  transition: background-color 0.2s;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.favorite-item:hover {
+  background-color: #f5f5f5;
+}
+
+.favorite-item .word {
+  font-weight: bold;
+  color: #28465e;
+}
+
+.favorite-item .translation {
+  font-size: 14px;
+  color: #666;
+}
+
+.empty-message {
+  text-align: center;
+  color: #999;
+  padding: 20px;
+}
+
+/* 添加滚动条样式 */
+.favorites-list::-webkit-scrollbar {
+  width: 6px;
+}
+
+.favorites-list::-webkit-scrollbar-track {
+  background: #f5f5f5;
+}
+
+.favorites-list::-webkit-scrollbar-thumb {
+  background-color: #28465e;
+  border-radius: 3px;
+}
+
+/* 单词表按钮样式 */
+.wordlist-button {
+  position: fixed;
+  top: 20px;
+  right: 20px;
+  padding: 8px 16px;
+  background: #28465e;
+  color: white;
+  border-radius: 4px;
+  cursor: pointer;
+  z-index: 1001;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+  font-weight: 500;
+}
+
+.more-wrapper {
+  position: relative;
+  display: flex;
+  align-items: center;
+  padding-left: 12px;
+  margin-left: 4px;
+  border-left: 1px solid rgba(255, 255, 255, 0.2);
+}
+
+.more-icon {
+  font-size: 20px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 4px;
+}
+
+.more-icon:hover {
+  color: rgba(255, 255, 255, 0.8);
+}
+
+.more-menu {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  background: white;
+  border-radius: 4px;
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.15);
+  min-width: 120px;
+  z-index: 1002;
+}
+
+.menu-item {
+  padding: 8px 16px;
+  color: #333;
+  cursor: pointer;
+  transition: background-color 0.2s;
+  display: block;
+  width: 100%;
+  text-align: left;
+  border: none;
+  background: none;
+  font: inherit;
+}
+
+.menu-item:hover {
+  background-color: #f5f5f5;
+}
+
+.menu-item + .menu-item {
+  border-top: 1px solid #eee;
+}
+
+@media (max-width: 768px) {
+  .favorites-button {
+    right: 100px;
+  }
+
+  .wordlist-button {
+    right: 20px;
+  }
+}
+
+/* 单词列表面板样式 */
+.wordlist-panel {
+  position: fixed;
+  top: 70px;
+  right: -320px;
+  width: 300px;
+  height: calc(100vh - 90px);
+  background: white;
+  border-radius: 8px;
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.15);
+  transition: right 0.3s ease;
+  display: flex;
+  flex-direction: column;
+  z-index: 1000;
+}
+
+.wordlist-panel.active {
+  right: 20px;
+}
+
+.wordlist-header {
+  padding: 16px;
+  background: #28465e;
+  color: white;
+  border-radius: 8px 8px 0 0;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.wordlist-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 16px;
+}
+
+.wordlist-item {
+  padding: 12px;
+  border-bottom: 1px solid #eee;
+  cursor: pointer;
+  transition: background-color 0.2s;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.wordlist-item:hover {
+  background-color: #f5f5f5;
+}
+
+.wordlist-item.active {
+  background-color: #e3f2fd;
+  border-left: 3px solid #28465e;
+}
+
+.wordlist-item .word {
+  font-weight: bold;
+  color: #28465e;
+}
+
+.wordlist-item .translation {
+  font-size: 14px;
+  color: #666;
+}
+
+/* 添加滚动条样式 */
+.wordlist-list::-webkit-scrollbar {
+  width: 6px;
+}
+
+.wordlist-list::-webkit-scrollbar-track {
+  background: #f5f5f5;
+}
+
+.wordlist-list::-webkit-scrollbar-thumb {
+  background-color: #28465e;
+  border-radius: 3px;
+}
+
+@media (max-width: 768px) {
+  .wordlist-panel {
+    width: calc(100% - 40px);
+    right: -100%;
+  }
+
+  .wordlist-panel.active {
+    right: 20px;
+  }
+}
+
+.search-box {
+  padding: 16px;
+  border-bottom: 1px solid #eee;
+  background: white;
+  position: sticky;
+  top: 0;
+  z-index: 1;
+}
+
+.search-box input {
+  width: 100%;
+  padding: 8px 12px;
+  border: 1px solid #ddd;
+  border-radius: 4px;
+  font-size: 14px;
+  outline: none;
+  transition: border-color 0.3s;
+  background: white;
+}
+
+.search-box input:focus {
+  border-color: #28465e;
+}
+
+.search-box input::placeholder {
+  color: #999;
+}
+
+/* 调整面板内部布局 */
+.favorites-panel,
+.wordlist-panel {
+  display: flex;
+  flex-direction: column;
+  height: calc(100vh - 90px);
+}
+
+.favorites-list,
+.wordlist-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 16px;
+  padding-top: 0;
+}
+
+/* 确保头部在搜索框之上 */
+.favorites-header,
+.wordlist-header {
+  z-index: 2;
 }
 </style>
